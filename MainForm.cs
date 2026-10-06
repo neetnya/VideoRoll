@@ -8,6 +8,7 @@ public sealed class MainForm : Form
     private readonly ToolStrip _toolbar = new();
     private readonly ToolStripButton _btnShuffle = new("随机打乱");
     private readonly ToolStripButton _btnClear = new("清空列表");
+    private readonly ToolStripButton _btnCleanInvalid = new("清理已失效");
     private readonly ToolStripButton _btnSettings = new("设置");
 
     private readonly ListView _list = new();
@@ -61,6 +62,8 @@ public sealed class MainForm : Form
         _btnShuffle.Click += (_, _) => Shuffle();
         _btnClear.ToolTipText = "清空列表（不会删除实际文件）";
         _btnClear.Click += (_, _) => ClearAll();
+        _btnCleanInvalid.ToolTipText = "移除列表中文件已不存在的条目";
+        _btnCleanInvalid.Click += (_, _) => CleanInvalid();
         _btnSettings.ToolTipText = "设置 mpv 路径、扩展名等";
         _btnSettings.Click += (_, _) => OpenSettings();
 
@@ -68,6 +71,7 @@ public sealed class MainForm : Form
         _toolbar.Items.Add(new ToolStripSeparator());
         _toolbar.Items.Add(_btnShuffle);
         _toolbar.Items.Add(_btnClear);
+        _toolbar.Items.Add(_btnCleanInvalid);
         _toolbar.Items.Add(new ToolStripSeparator());
         _toolbar.Items.Add(_btnSettings);
 
@@ -348,6 +352,31 @@ public sealed class MainForm : Form
         SavePlaylist();
     }
 
+    private void CleanInvalid()
+    {
+        var invalid = _items.Where(p => !File.Exists(p)).ToList();
+        if (invalid.Count == 0)
+        {
+            MessageBox.Show(this, "没有发现已失效的条目。", "VideoRoll",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var r = MessageBox.Show(
+            this,
+            $"共发现 {invalid.Count} 个文件已不存在的条目，是否从列表中移除？",
+            "清理已失效",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+        if (r != DialogResult.Yes)
+            return;
+
+        var removed = new HashSet<string>(invalid, StringComparer.OrdinalIgnoreCase);
+        _items.RemoveAll(p => removed.Contains(p));
+        RefreshList();
+        SavePlaylist();
+    }
+
     // ---------- 打开所在目录 ----------
 
     private void OpenClickedItemFolder()
@@ -355,6 +384,18 @@ public sealed class MainForm : Form
         string? p = _rightClickedPath;
         if (string.IsNullOrWhiteSpace(p) && _list.SelectedItems.Count > 0)
             p = _list.SelectedItems[0].Tag as string;
+        if (string.IsNullOrWhiteSpace(p) || !File.Exists(p))
+            return;
+        OpenInExplorer(p);
+    }
+
+    private void OpenSelectedInExplorer()
+    {
+        // 单选时在资源管理器中查看选中文件
+        var item = _list.SelectedItems.Count == 1
+            ? _list.SelectedItems[0]
+            : _list.FocusedItem;
+        string? p = item?.Tag as string;
         if (string.IsNullOrWhiteSpace(p) || !File.Exists(p))
             return;
         OpenInExplorer(p);
@@ -427,6 +468,11 @@ public sealed class MainForm : Form
         {
             foreach (ListViewItem it in _list.Items)
                 it.Selected = true;
+            e.Handled = true;
+        }
+        else if (e.Control && e.KeyCode == Keys.F)
+        {
+            OpenSelectedInExplorer();
             e.Handled = true;
         }
     }
