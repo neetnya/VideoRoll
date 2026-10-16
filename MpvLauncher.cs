@@ -34,35 +34,62 @@ public static class MpvLauncher
 
     /// <summary>
     /// 用软件当前的播放列表启动 mpv，并从 startIndex（0 基）处开始播放。
-    /// 同时通过 --script-opts=autoload-disabled=yes 禁用 autoload.lua，
-    /// 避免它把“当前目录的视频”塞进播放列表。
+    /// 同时通过 --script-opts=autoload-disabled=yes 禁用 autoload.lua。
+    /// 失败时返回错误说明，成功返回 null。
     /// </summary>
-    public static void Play(string mpvPath, IReadOnlyList<string> playlist, int startIndex,
+    public static string? Play(string mpvPath, IReadOnlyList<string> playlist, int startIndex,
         IReadOnlyList<string> extraArgs)
     {
-        string tmp = Path.Combine(Path.GetTempPath(), "videoroll_playlist.m3u8");
-        var lines = new List<string> { "#EXTM3U" };
-        lines.AddRange(playlist);
-        File.WriteAllLines(tmp, lines, new UTF8Encoding(false));
+        if (playlist.Count == 0)
+            return "播放列表为空。";
 
-        var parts = new List<string>
+        string tmp = Path.Combine(Path.GetTempPath(), "videoroll_" + Guid.NewGuid().ToString("n") + ".m3u8");
+        try
         {
-            "--playlist=" + Quote(tmp),
-            "--playlist-start=" + Math.Max(0, startIndex).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            "--script-opts=autoload-disabled=yes",
-        };
-        foreach (var a in extraArgs)
-            if (!string.IsNullOrWhiteSpace(a))
-                parts.Add(a);
+            var lines = new List<string> { "#EXTM3U" };
+            lines.AddRange(playlist);
+            File.WriteAllLines(tmp, lines, new UTF8Encoding(false));
 
-        var psi = new ProcessStartInfo
+            var parts = new List<string>
+            {
+                "--playlist=" + Quote(tmp),
+                "--playlist-start=" + Math.Max(0, startIndex).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--script-opts=autoload-disabled=yes",
+            };
+            foreach (var a in extraArgs)
+                if (!string.IsNullOrWhiteSpace(a))
+                    parts.Add(a);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = mpvPath,
+                Arguments = string.Join(" ", parts),
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(mpvPath) ?? "",
+            };
+            Process.Start(psi);
+        }
+        catch (Exception ex)
         {
-            FileName = mpvPath,
-            Arguments = string.Join(" ", parts),
-            UseShellExecute = true,
-            WorkingDirectory = Path.GetDirectoryName(mpvPath) ?? "",
-        };
-        Process.Start(psi);
+            TryDelete(tmp);
+            return ex.Message;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                TryDelete(tmp);
+            }
+            catch { /* 临时文件清理由系统回收亦可 */ }
+        });
+        return null;
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { File.Delete(path); } catch { /* 仍被占用时稍后由系统清理 */ }
     }
 
     private static string Quote(string s) => "\"" + s.Replace("\"", "\\\"") + "\"";

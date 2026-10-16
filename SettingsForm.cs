@@ -24,8 +24,10 @@ public sealed class SettingsForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(580, 240);
-        Font = new Font("Microsoft YaHei UI", 9F);
+        ClientSize = new Size(580, 248);
+        Font = UiStyle.UiFont();
+        UiStyle.ApplyChrome(this);
+        ShowIcon = false;
 
         var lblMpv = new Label
         {
@@ -39,8 +41,9 @@ public sealed class SettingsForm : Form
         var btnBrowse = new Button
         {
             Text = "浏览...",
-            Location = new Point(470, 43),
-            Size = new Size(92, 27),
+            Location = new Point(470, 42),
+            Size = new Size(92, 28),
+            FlatStyle = FlatStyle.System,
         };
         btnBrowse.Click += (_, _) =>
         {
@@ -63,26 +66,29 @@ public sealed class SettingsForm : Form
         _ext.Size = new Size(546, 25);
         _ext.Text = ExtensionsValue;
 
-        _rec.Location = new Point(16, 148);
+        _rec.Location = new Point(16, 150);
         _rec.AutoSize = true;
         _rec.Text = "导入文件夹时递归搜索子文件夹";
         _rec.Checked = recursive;
+        _rec.BackColor = BackColor;
 
         var btnOk = new Button
         {
             Text = "确定",
-            Location = new Point(384, 192),
+            Location = new Point(384, 200),
             Size = new Size(84, 32),
             DialogResult = DialogResult.OK,
+            FlatStyle = FlatStyle.System,
         };
         btnOk.Click += (_, _) => Apply();
 
         var btnCancel = new Button
         {
             Text = "取消",
-            Location = new Point(478, 192),
+            Location = new Point(478, 200),
             Size = new Size(84, 32),
             DialogResult = DialogResult.Cancel,
+            FlatStyle = FlatStyle.System,
         };
 
         AcceptButton = btnOk;
