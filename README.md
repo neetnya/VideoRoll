@@ -50,13 +50,7 @@ VideoRoll —— 便携式视频播放列表小工具
 - Recursive ：导入文件夹时是否递归搜索子文件夹（true / false）。
 - ExtraArgs ：额外追加给 mpv 的启动参数（一般不用改）。
 
-
-【自行编译（可选，需要联网）】
+【自行编译】
 需要 .NET 9 SDK。在源码目录执行：
 
-    dotnet publish -c Release -r win-x64 --self-contained true ^
-      -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true ^
-      -p:IncludeNativeLibrariesForSelfExtract=true -o dist-single
-
-即可得到单文件 VideoRoll.exe（单文件打包需要联网下载组件；本压缩包内的版本
-为免联网即可运行的“文件夹版”，功能完全一致）。
+    dotnet publish -c Release
