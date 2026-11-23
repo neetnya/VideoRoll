@@ -6,15 +6,17 @@ namespace VideoRoll;
 
 public sealed class MainForm : Form
 {
-    private const string DefaultHint = "拖入文件夹或视频即可导入；双击播放；Del 移除；Ctrl+Z 撤销。";
+    private const string DefaultHint = "拖入文件夹、视频或 .m3u8 即可导入；双击播放；Del 移除；Ctrl+Z 撤销。";
     private const int UndoMax = 20;
 
     private readonly ToolStrip _toolbar = new();
+    private readonly ToolStripDropDownButton _btnSort = new("排序");
     private readonly ToolStripButton _btnShuffle = new("随机打乱");
     private readonly ToolStripButton _btnClear = new("清空列表");
     private readonly ToolStripButton _btnCleanInvalid = new("清理已失效");
     private readonly ToolStripButton _btnSettings = new("设置");
     private readonly TextBox _filter = new();
+    private readonly System.Windows.Forms.Timer _filterDebounce = new() { Interval = 120 };
 
     private readonly ListView _list = new();
     private readonly StatusStrip _status = new();
@@ -24,6 +26,7 @@ public sealed class MainForm : Form
 
     private readonly ContextMenuStrip _menu = new();
     private readonly ToolStripMenuItem _miPlay = new("播放");
+    private readonly ToolStripMenuItem _miPlayFiltered = new("仅播放当前过滤结果");
     private readonly ToolStripMenuItem _miOpenDir = new("打开文件所在目录");
     private readonly ToolStripMenuItem _miCopy = new("复制路径");
     private readonly ToolStripMenuItem _miRemove = new("从列表中移除");
@@ -34,6 +37,8 @@ public sealed class MainForm : Form
     private readonly HashSet<string> _missing = new(StringComparer.OrdinalIgnoreCase);
 
     private AppConfig _config = new();
+    private Icon? _appIcon;
+    private string? _cachedMpvPath;
     private string? _rightClickedPath;
     private string? _hintOverride;
     private Color _hintColor = SystemColors.ControlText;
@@ -52,8 +57,15 @@ public sealed class MainForm : Form
     public MainForm()
     {
         _config = Store.LoadConfig(ConfigPath);
+        _cachedMpvPath = MpvLauncher.FindMpv(_config.MpvPath, AppDir);
         var loaded = Store.LoadPlaylist(PlaylistPath);
         AbsorbPaths(loaded.Items);
+
+        _filterDebounce.Tick += (_, _) =>
+        {
+            _filterDebounce.Stop();
+            RefreshList();
+        };
 
         BuildUi();
         ApplyWindowBounds();
@@ -65,6 +77,18 @@ public sealed class MainForm : Form
             Shown += (_, _) => MessageBox.Show(this, loaded.Warning, "VideoRoll",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _filterDebounce.Stop();
+            _filterDebounce.Dispose();
+            _appIcon?.Dispose();
+            _appIcon = null;
+        }
+        base.Dispose(disposing);
     }
 
     // ---------- UI 构建 ----------
@@ -79,7 +103,8 @@ public sealed class MainForm : Form
         AllowDrop = true;
         KeyPreview = true;
         Font = UiStyle.UiFont();
-        Icon = UiStyle.CreateAppIcon();
+        _appIcon = UiStyle.CreateAppIcon();
+        Icon = _appIcon;
         UiStyle.ApplyChrome(this);
 
         UiStyle.ApplyToolStrip(_toolbar);
@@ -87,8 +112,14 @@ public sealed class MainForm : Form
         _toolbar.Font = Font;
 
         var btnAdd = new ToolStripDropDownButton("添加");
-        btnAdd.DropDownItems.Add("添加文件...", null, (_, _) => AddFilesViaDialog());
+        btnAdd.DropDownItems.Add("添加文件 / 播放列表...", null, (_, _) => AddFilesViaDialog());
         btnAdd.DropDownItems.Add("添加文件夹...", null, (_, _) => AddFolderViaDialog());
+
+        _btnSort.ToolTipText = "按名称、路径排序或反转顺序（Ctrl+Z 可撤销）";
+        _btnSort.DropDownItems.Add("按文件名自然排序", null, (_, _) => SortItems(byFullPath: false));
+        _btnSort.DropDownItems.Add("按路径自然排序", null, (_, _) => SortItems(byFullPath: true));
+        _btnSort.DropDownItems.Add(new ToolStripSeparator());
+        _btnSort.DropDownItems.Add("反转当前顺序", null, (_, _) => ReverseItems());
 
         _btnShuffle.ToolTipText = "随机打乱播放列表顺序（Ctrl+Z 可撤销）";
         _btnShuffle.Click += (_, _) => Shuffle();
@@ -96,11 +127,12 @@ public sealed class MainForm : Form
         _btnClear.Click += (_, _) => ClearAll();
         _btnCleanInvalid.ToolTipText = "移除列表中文件已不存在的条目";
         _btnCleanInvalid.Click += (_, _) => CleanInvalid();
-        _btnSettings.ToolTipText = "设置 mpv 路径、扩展名等";
+        _btnSettings.ToolTipText = "设置 mpv 路径、扩展名、额外参数等";
         _btnSettings.Click += (_, _) => OpenSettings();
 
         _toolbar.Items.Add(btnAdd);
         _toolbar.Items.Add(new ToolStripSeparator());
+        _toolbar.Items.Add(_btnSort);
         _toolbar.Items.Add(_btnShuffle);
         _toolbar.Items.Add(_btnClear);
         _toolbar.Items.Add(_btnCleanInvalid);
@@ -123,9 +155,13 @@ public sealed class MainForm : Form
         };
         _filter.BorderStyle = BorderStyle.FixedSingle;
         _filter.Dock = DockStyle.Fill;
-        _filter.TextChanged += (_, _) => RefreshList();
+        _filter.TextChanged += (_, _) =>
+        {
+            _filterDebounce.Stop();
+            _filterDebounce.Start();
+        };
         _filter.KeyDown += OnFilterKeyDown;
-        UiStyle.SetCue(_filter, "输入文件名过滤列表…");
+        UiStyle.SetCue(_filter, "输入文件名或路径过滤列表…（Ctrl+L 聚焦，Esc 清空）");
         var filterInner = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 0, 0, 0) };
         if (!SystemInformation.HighContrast)
             filterInner.BackColor = UiStyle.Chrome;
@@ -167,11 +203,12 @@ public sealed class MainForm : Form
         KeyDown += OnFormKeyDown;
         FormClosing += OnFormClosing;
 
-        _miPlay.Click += (_, _) => PlaySelected();
+        _miPlay.Click += (_, _) => PlaySelected(filteredOnly: false);
+        _miPlayFiltered.Click += (_, _) => PlaySelected(filteredOnly: true);
         _miOpenDir.Click += (_, _) => OpenClickedItemFolder();
         _miCopy.Click += (_, _) => CopySelectedPaths();
         _miRemove.Click += (_, _) => RemoveSelected();
-        var miAddFiles = new ToolStripMenuItem("添加文件...");
+        var miAddFiles = new ToolStripMenuItem("添加文件 / 播放列表...");
         miAddFiles.Click += (_, _) => AddFilesViaDialog();
         var miAddFolder = new ToolStripMenuItem("添加文件夹...");
         miAddFolder.Click += (_, _) => AddFolderViaDialog();
@@ -183,7 +220,7 @@ public sealed class MainForm : Form
         _menu.Font = Font;
         _menu.Items.AddRange(new ToolStripItem[]
         {
-            _miPlay, _miOpenDir, _miCopy, _miRemove,
+            _miPlay, _miPlayFiltered, _miOpenDir, _miCopy, _miRemove,
             new ToolStripSeparator(),
             miAddFiles, miAddFolder, miExport,
             new ToolStripSeparator(),
@@ -196,7 +233,7 @@ public sealed class MainForm : Form
         _lblHint.TextAlign = ContentAlignment.MiddleLeft;
         _lblHint.Text = DefaultHint;
         _lblCount.AutoSize = false;
-        _lblCount.Width = 170;
+        _lblCount.Width = 180;
         _lblCount.TextAlign = ContentAlignment.MiddleRight;
         _lblMpv.AutoSize = false;
         _lblMpv.Width = 110;
@@ -230,8 +267,9 @@ public sealed class MainForm : Form
         string? top = _list.TopItem?.Tag as string;
         string filter = _filter.Text.Trim();
 
-        _list.BeginUpdate();
-        _list.Items.Clear();
+        var buffer = new List<ListViewItem>(_items.Count);
+        ListViewItem? topItem = null;
+
         foreach (var p in _items)
         {
             var name = Path.GetFileName(p);
@@ -246,29 +284,35 @@ public sealed class MainForm : Form
             li.ToolTipText = p;
             if (_missing.Contains(p))
                 li.ForeColor = UiStyle.MissingText;
-            _list.Items.Add(li);
-        }
-        _list.EndUpdate();
-
-        foreach (ListViewItem it in _list.Items)
-        {
-            var p = (string)it.Tag!;
-            if (selected.Contains(p))
-                it.Selected = true;
-            if (focused != null && string.Equals(p, focused, StringComparison.OrdinalIgnoreCase))
-                it.Focused = true;
+            if (top != null && topItem == null && string.Equals(p, top, StringComparison.OrdinalIgnoreCase))
+                topItem = li;
+            buffer.Add(li);
         }
 
-        if (top != null)
+        _list.BeginUpdate();
+        try
         {
-            foreach (ListViewItem it in _list.Items)
+            _list.Items.Clear();
+            if (buffer.Count > 0)
+                _list.Items.AddRange(buffer.ToArray());
+
+            foreach (var it in buffer)
             {
-                if (string.Equals((string)it.Tag!, top, StringComparison.OrdinalIgnoreCase))
-                {
-                    try { _list.TopItem = it; } catch { /* 尚未布局完时可能失败 */ }
-                    break;
-                }
+                var p = (string)it.Tag!;
+                if (selected.Contains(p))
+                    it.Selected = true;
+                if (focused != null && string.Equals(p, focused, StringComparison.OrdinalIgnoreCase))
+                    it.Focused = true;
             }
+        }
+        finally
+        {
+            _list.EndUpdate();
+        }
+
+        if (topItem != null)
+        {
+            try { _list.TopItem = topItem; } catch { /* 尚未布局完时可能失败 */ }
         }
 
         StretchPathColumn();
@@ -278,6 +322,11 @@ public sealed class MainForm : Form
     private HashSet<string> SelectedPaths() =>
         new(_list.SelectedItems.Cast<ListViewItem>().Select(x => (string)x.Tag!),
             StringComparer.OrdinalIgnoreCase);
+
+    private void RefreshMpvCache()
+    {
+        _cachedMpvPath = MpvLauncher.FindMpv(_config.MpvPath, AppDir);
+    }
 
     private void UpdateStatus()
     {
@@ -292,8 +341,7 @@ public sealed class MainForm : Form
         else
             _lblCount.Text = $"共 {_items.Count} 项";
 
-        var mpv = MpvLauncher.FindMpv(_config.MpvPath, AppDir);
-        _lblMpv.Text = mpv != null ? "mpv 就绪" : "未找到 mpv";
+        _lblMpv.Text = _cachedMpvPath != null ? "mpv 就绪" : "未找到 mpv";
 
         if (_saveFailed)
         {
@@ -354,8 +402,9 @@ public sealed class MainForm : Form
 
         var full = Path.GetFullPath(stored);
 
-        // 绿色盘换盘符后，把原来的绝对路径接到当前程序所在盘再试一次
-        if (full.Length >= 3 && full[1] == ':' && AppDir.Length >= 3 && AppDir[1] == ':' &&
+        // 仅当原绝对路径不存在时，才尝试绿色盘换盘符重定位
+        if (!File.Exists(full) &&
+            full.Length >= 3 && full[1] == ':' && AppDir.Length >= 3 && AppDir[1] == ':' &&
             char.ToUpperInvariant(full[0]) != char.ToUpperInvariant(AppDir[0]))
         {
             var relocated = AppDir[0] + full[1..];
@@ -404,6 +453,8 @@ public sealed class MainForm : Form
         {
             var added = new List<string>();
             int duplicates = 0, skippedExt = 0, folderErrors = 0;
+            bool preserveOrder = false;
+
             foreach (var raw in snapshot)
             {
                 try
@@ -420,12 +471,29 @@ public sealed class MainForm : Form
                     }
                     else if (File.Exists(raw))
                     {
-                        if (!MatchesExt(raw, exts))
+                        if (IsPlaylistFile(raw))
+                        {
+                            preserveOrder = true;
+                            foreach (var entry in ReadPlaylistEntries(raw))
+                            {
+                                if (!existing.Add(entry))
+                                    duplicates++;
+                                else
+                                    added.Add(entry);
+                            }
+                        }
+                        else if (!MatchesExt(raw, exts))
+                        {
                             skippedExt++;
+                        }
                         else if (!existing.Add(raw))
+                        {
                             duplicates++;
+                        }
                         else
+                        {
                             added.Add(raw);
+                        }
                     }
                 }
                 catch
@@ -434,9 +502,40 @@ public sealed class MainForm : Form
                 }
             }
 
-            added.Sort(NaturalSort.Compare);
+            if (!preserveOrder)
+                added.Sort(NaturalSort.Compare);
             Ui(() => FinishImport(added, duplicates, skippedExt, folderErrors));
         });
+    }
+
+    private static bool IsPlaylistFile(string path)
+    {
+        string ext = Path.GetExtension(path);
+        return ext.Equals(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".m3u", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> ReadPlaylistEntries(string playlistFile)
+    {
+        string baseDir = Path.GetDirectoryName(playlistFile) ?? "";
+        foreach (string rawLine in File.ReadLines(playlistFile))
+        {
+            string line = rawLine.Trim();
+            if (line.Length == 0 || line.StartsWith('#'))
+                continue;
+            string full;
+            try
+            {
+                full = Path.IsPathFullyQualified(line)
+                    ? Path.GetFullPath(line)
+                    : Path.GetFullPath(Path.Combine(baseDir, line));
+            }
+            catch
+            {
+                continue;
+            }
+            yield return full;
+        }
     }
 
     private void FinishImport(List<string> added, int duplicates, int skippedExt, int folderErrors)
@@ -469,8 +568,11 @@ public sealed class MainForm : Form
     {
         var result = new List<string>();
         var stack = new Stack<string>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         stack.Push(root);
+        visited.Add(Path.GetFullPath(root).TrimEnd('\\'));
         int errors = 0;
+
         while (stack.Count > 0)
         {
             var dir = stack.Pop();
@@ -493,7 +595,21 @@ public sealed class MainForm : Form
             try
             {
                 foreach (var sub in Directory.EnumerateDirectories(dir))
-                    stack.Push(sub);
+                {
+                    try
+                    {
+                        // 跳过符号链接/目录联接点，防止循环目录导致无限递归
+                        if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0)
+                            continue;
+                        string key = Path.GetFullPath(sub).TrimEnd('\\');
+                        if (visited.Add(key))
+                            stack.Push(sub);
+                    }
+                    catch
+                    {
+                        errors++;
+                    }
+                }
             }
             catch
             {
@@ -514,7 +630,7 @@ public sealed class MainForm : Form
     {
         using var ofd = new OpenFileDialog
         {
-            Title = "选择视频文件",
+            Title = "选择视频文件或播放列表",
             Filter = BuildFileFilter(),
             Multiselect = true,
             InitialDirectory = Directory.Exists(_config.LastDir) ? _config.LastDir : "",
@@ -561,7 +677,7 @@ public sealed class MainForm : Form
             .Distinct()
             .ToList();
         var joined = string.Join(";", exts.Select(e => "*." + e));
-        return $"视频文件 ({joined})|{joined}|所有文件 (*.*)|*.*";
+        return $"视频文件 ({joined})|{joined}|播放列表 (*.m3u8;*.m3u)|*.m3u8;*.m3u|所有文件 (*.*)|*.*";
     }
 
     // ---------- 播放 ----------
@@ -571,29 +687,52 @@ public sealed class MainForm : Form
         var item = _list.FocusedItem
             ?? (_list.SelectedItems.Count > 0 ? _list.SelectedItems[0] : null);
         if (item != null)
-            PlayItem(item);
+            PlayItem(item, filteredOnly: false);
     }
 
-    private void PlaySelected()
+    private void PlaySelected(bool filteredOnly)
     {
         var item = _list.SelectedItems.Count > 0 ? _list.SelectedItems[0] : null;
         if (item != null)
-            PlayItem(item);
+            PlayItem(item, filteredOnly);
     }
 
-    private void PlayItem(ListViewItem item)
+    private void PlayItem(ListViewItem item, bool filteredOnly)
     {
         string? path = item.Tag as string;
         if (string.IsNullOrWhiteSpace(path))
             return;
-        int index = _items.FindIndex(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+
+        if (!File.Exists(path))
+        {
+            _missing.Add(path);
+            item.ForeColor = UiStyle.MissingText;
+            UpdateStatus();
+            SetHint("该视频文件不存在或已移动，无法播放。", warn: true);
+            return;
+        }
+
+        IReadOnlyList<string> playList;
+        int index;
+        if (filteredOnly && IsFilterOn())
+        {
+            var visible = _list.Items.Cast<ListViewItem>().Select(x => (string)x.Tag!).ToList();
+            index = visible.FindIndex(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+            playList = visible;
+        }
+        else
+        {
+            index = _items.FindIndex(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+            playList = _items;
+        }
+
         if (index < 0)
             return;
 
         string? mpv = ResolveMpv();
         if (mpv == null)
             return;
-        string? err = MpvLauncher.Play(mpv, _items, index, _config.ExtraArgs ?? []);
+        string? err = MpvLauncher.Play(mpv, playList, index, _config.ExtraArgs ?? []);
         if (err != null)
         {
             MessageBox.Show(this, "无法启动 mpv：\n" + err, "VideoRoll",
@@ -603,16 +742,16 @@ public sealed class MainForm : Form
 
     private string? ResolveMpv()
     {
-        var found = MpvLauncher.FindMpv(_config.MpvPath, AppDir);
-        if (found != null)
+        RefreshMpvCache();
+        if (_cachedMpvPath != null)
         {
-            if (!string.Equals(found, _config.MpvPath, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(_cachedMpvPath, _config.MpvPath, StringComparison.OrdinalIgnoreCase))
             {
-                _config.MpvPath = found;
+                _config.MpvPath = _cachedMpvPath;
                 Store.SaveConfig(ConfigPath, _config);
                 UpdateStatus();
             }
-            return found;
+            return _cachedMpvPath;
         }
 
         var r = MessageBox.Show(
@@ -633,12 +772,13 @@ public sealed class MainForm : Form
             return null;
 
         _config.MpvPath = ofd.FileName;
+        _cachedMpvPath = ofd.FileName;
         Store.SaveConfig(ConfigPath, _config);
         UpdateStatus();
         return ofd.FileName;
     }
 
-    // ---------- 移除 / 打乱 / 清空 / 移动 ----------
+    // ---------- 移除 / 排序 / 打乱 / 清空 / 移动 ----------
 
     private void RemoveSelected()
     {
@@ -650,6 +790,39 @@ public sealed class MainForm : Form
         RefreshList();
         SavePlaylist();
         SetHint($"已移除 {toRemove.Count} 项，Ctrl+Z 可撤销。");
+    }
+
+    private void SortItems(bool byFullPath)
+    {
+        if (_items.Count < 2)
+            return;
+        PushUndo();
+        if (byFullPath)
+        {
+            _items.Sort(NaturalSort.Compare);
+        }
+        else
+        {
+            _items.Sort((a, b) =>
+            {
+                int c = NaturalSort.Compare(Path.GetFileName(a), Path.GetFileName(b));
+                return c != 0 ? c : NaturalSort.Compare(a, b);
+            });
+        }
+        RefreshList();
+        SavePlaylist();
+        SetHint(byFullPath ? "已按路径自然排序，Ctrl+Z 可撤销。" : "已按文件名自然排序，Ctrl+Z 可撤销。");
+    }
+
+    private void ReverseItems()
+    {
+        if (_items.Count < 2)
+            return;
+        PushUndo();
+        _items.Reverse();
+        RefreshList();
+        SavePlaylist();
+        SetHint("已反转顺序，Ctrl+Z 可撤销。");
     }
 
     private void Shuffle()
@@ -884,9 +1057,9 @@ public sealed class MainForm : Form
         string? p = _rightClickedPath;
         if (string.IsNullOrWhiteSpace(p) && _list.SelectedItems.Count > 0)
             p = _list.SelectedItems[0].Tag as string;
-        if (string.IsNullOrWhiteSpace(p) || !File.Exists(p))
+        if (string.IsNullOrWhiteSpace(p))
             return;
-        OpenInExplorer(p);
+        OpenPathOrParentInExplorer(p);
     }
 
     private void OpenSelectedInExplorer()
@@ -895,16 +1068,35 @@ public sealed class MainForm : Form
             ? _list.SelectedItems[0]
             : _list.FocusedItem;
         string? p = item?.Tag as string;
-        if (string.IsNullOrWhiteSpace(p) || !File.Exists(p))
+        if (string.IsNullOrWhiteSpace(p))
             return;
-        OpenInExplorer(p);
+        OpenPathOrParentInExplorer(p);
     }
 
-    private static void OpenInExplorer(string path)
+    private void OpenPathOrParentInExplorer(string path)
+    {
+        if (File.Exists(path))
+        {
+            OpenInExplorer("/select,\"" + path + "\"");
+            return;
+        }
+
+        string? dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+        {
+            OpenInExplorer("\"" + dir + "\"");
+            SetHint("文件已不存在，已打开其原所在目录。");
+            return;
+        }
+
+        SetHint("文件与所在目录均已不存在。", warn: true);
+    }
+
+    private static void OpenInExplorer(string args)
     {
         try
         {
-            Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"")
+            using var proc = Process.Start(new ProcessStartInfo("explorer.exe", args)
             {
                 UseShellExecute = true,
             });
@@ -945,7 +1137,7 @@ public sealed class MainForm : Form
             return;
         try
         {
-            var lines = new List<string> { "#EXTM3U" };
+            var lines = new List<string>(_items.Count + 1) { "#EXTM3U" };
             lines.AddRange(_items);
             File.WriteAllLines(sfd.FileName, lines, new System.Text.UTF8Encoding(false));
             RememberDir(sfd.FileName);
@@ -962,7 +1154,7 @@ public sealed class MainForm : Form
 
     private void OpenSettings()
     {
-        using var dlg = new SettingsForm(_config.MpvPath, _config.Extensions, _config.Recursive);
+        using var dlg = new SettingsForm(_config.MpvPath, _config.Extensions, _config.Recursive, _config.ExtraArgs);
         if (dlg.ShowDialog(this) != DialogResult.OK)
             return;
 
@@ -975,14 +1167,48 @@ public sealed class MainForm : Form
             .ToList();
         if (_config.Extensions.Count == 0)
             _config.Extensions = AppConfig.DefaultExtensions();
+        _config.ExtraArgs = SplitCommandArgs(dlg.ExtraArgsValue);
         _config.Recursive = dlg.RecursiveValue;
 
+        RefreshMpvCache();
         if (!Store.SaveConfig(ConfigPath, _config))
         {
             MessageBox.Show(this, "设置未能保存（目录只读或权限不足）。", "VideoRoll",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         UpdateStatus();
+    }
+
+    private static List<string> SplitCommandArgs(string input)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(input))
+            return result;
+
+        var cur = new System.Text.StringBuilder();
+        bool inQuotes = false;
+        foreach (char c in input)
+        {
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+            }
+            else if (char.IsWhiteSpace(c) && !inQuotes)
+            {
+                if (cur.Length > 0)
+                {
+                    result.Add(cur.ToString());
+                    cur.Clear();
+                }
+            }
+            else
+            {
+                cur.Append(c);
+            }
+        }
+        if (cur.Length > 0)
+            result.Add(cur.ToString());
+        return result;
     }
 
     // ---------- 事件 ----------
@@ -1023,6 +1249,15 @@ public sealed class MainForm : Form
 
     private void OnFormKeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.Control && e.KeyCode == Keys.L)
+        {
+            _filter.Focus();
+            _filter.SelectAll();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return;
+        }
+
         if (_filter.Focused)
             return;
         if (e.Control && e.KeyCode == Keys.Z)
@@ -1046,6 +1281,19 @@ public sealed class MainForm : Form
             _filter.Clear();
             e.Handled = true;
         }
+        else if (e.KeyCode == Keys.Enter)
+        {
+            _filterDebounce.Stop();
+            RefreshList();
+            if (_list.Items.Count > 0)
+            {
+                _list.Focus();
+                _list.Items[0].Selected = true;
+                _list.Items[0].Focused = true;
+            }
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        }
     }
 
     private void OnListKeyDown(object? sender, KeyEventArgs e)
@@ -1057,8 +1305,16 @@ public sealed class MainForm : Form
         }
         else if (e.Control && e.KeyCode == Keys.A)
         {
-            foreach (ListViewItem it in _list.Items)
-                it.Selected = true;
+            _list.BeginUpdate();
+            try
+            {
+                foreach (ListViewItem it in _list.Items)
+                    it.Selected = true;
+            }
+            finally
+            {
+                _list.EndUpdate();
+            }
             e.Handled = true;
         }
         else if (e.Control && e.KeyCode == Keys.F)
@@ -1099,6 +1355,8 @@ public sealed class MainForm : Form
 
         bool hasTarget = hit != null || _list.SelectedItems.Count > 0;
         _miPlay.Enabled = hasTarget;
+        _miPlayFiltered.Visible = IsFilterOn();
+        _miPlayFiltered.Enabled = hasTarget && _list.Items.Count > 0;
         _miOpenDir.Enabled = hasTarget;
         _miCopy.Enabled = hasTarget;
         _miRemove.Enabled = _list.SelectedItems.Count > 0;
@@ -1106,13 +1364,11 @@ public sealed class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (WindowState == FormWindowState.Normal)
-        {
-            _config.WinX = Left;
-            _config.WinY = Top;
-            _config.WinW = Width;
-            _config.WinH = Height;
-        }
+        Rectangle bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        _config.WinX = bounds.X;
+        _config.WinY = bounds.Y;
+        _config.WinW = bounds.Width;
+        _config.WinH = bounds.Height;
         _config.ColNameWidth = _list.Columns[0].Width;
         Store.SaveConfig(ConfigPath, _config);
         SavePlaylist();

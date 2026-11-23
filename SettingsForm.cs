@@ -7,16 +7,19 @@ public sealed class SettingsForm : Form
 {
     public string MpvPathValue { get; private set; }
     public string ExtensionsValue { get; private set; }
+    public string ExtraArgsValue { get; private set; }
     public bool RecursiveValue { get; private set; }
 
     private readonly TextBox _mpv = new();
     private readonly TextBox _ext = new();
+    private readonly TextBox _extraArgs = new();
     private readonly CheckBox _rec = new();
 
-    public SettingsForm(string mpvPath, IEnumerable<string> extensions, bool recursive)
+    public SettingsForm(string mpvPath, IEnumerable<string> extensions, bool recursive, IEnumerable<string> extraArgs)
     {
         MpvPathValue = mpvPath;
         ExtensionsValue = string.Join(", ", extensions);
+        ExtraArgsValue = string.Join(" ", extraArgs);
         RecursiveValue = recursive;
 
         Text = "设置";
@@ -24,7 +27,8 @@ public sealed class SettingsForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(580, 248);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ClientSize = new Size(580, 316);
         Font = UiStyle.UiFont();
         UiStyle.ApplyChrome(this);
         ShowIcon = false;
@@ -32,16 +36,16 @@ public sealed class SettingsForm : Form
         var lblMpv = new Label
         {
             Text = "mpv 播放器路径 (mpv.exe)：",
-            Location = new Point(16, 20),
+            Location = new Point(16, 18),
             AutoSize = true,
         };
-        _mpv.Location = new Point(16, 44);
+        _mpv.Location = new Point(16, 42);
         _mpv.Size = new Size(446, 25);
         _mpv.Text = mpvPath;
         var btnBrowse = new Button
         {
             Text = "浏览...",
-            Location = new Point(470, 42),
+            Location = new Point(470, 40),
             Size = new Size(92, 28),
             FlatStyle = FlatStyle.System,
         };
@@ -59,14 +63,35 @@ public sealed class SettingsForm : Form
         var lblExt = new Label
         {
             Text = "视频文件扩展名（逗号分隔，不含点）：",
-            Location = new Point(16, 86),
+            Location = new Point(16, 82),
             AutoSize = true,
         };
-        _ext.Location = new Point(16, 110);
-        _ext.Size = new Size(546, 25);
+        var btnResetExt = new Button
+        {
+            Text = "恢复默认",
+            Location = new Point(470, 104),
+            Size = new Size(92, 28),
+            FlatStyle = FlatStyle.System,
+        };
+        btnResetExt.Click += (_, _) =>
+        {
+            _ext.Text = string.Join(", ", AppConfig.DefaultExtensions());
+        };
+        _ext.Location = new Point(16, 106);
+        _ext.Size = new Size(446, 25);
         _ext.Text = ExtensionsValue;
 
-        _rec.Location = new Point(16, 150);
+        var lblExtra = new Label
+        {
+            Text = "额外 mpv 启动参数（空格分隔，例如 --fs --volume=80）：",
+            Location = new Point(16, 146),
+            AutoSize = true,
+        };
+        _extraArgs.Location = new Point(16, 170);
+        _extraArgs.Size = new Size(546, 25);
+        _extraArgs.Text = ExtraArgsValue;
+
+        _rec.Location = new Point(16, 212);
         _rec.AutoSize = true;
         _rec.Text = "导入文件夹时递归搜索子文件夹";
         _rec.Checked = recursive;
@@ -75,7 +100,7 @@ public sealed class SettingsForm : Form
         var btnOk = new Button
         {
             Text = "确定",
-            Location = new Point(384, 200),
+            Location = new Point(384, 266),
             Size = new Size(84, 32),
             DialogResult = DialogResult.OK,
             FlatStyle = FlatStyle.System,
@@ -85,7 +110,7 @@ public sealed class SettingsForm : Form
         var btnCancel = new Button
         {
             Text = "取消",
-            Location = new Point(478, 200),
+            Location = new Point(478, 266),
             Size = new Size(84, 32),
             DialogResult = DialogResult.Cancel,
             FlatStyle = FlatStyle.System,
@@ -96,7 +121,10 @@ public sealed class SettingsForm : Form
 
         Controls.AddRange(new Control[]
         {
-            lblMpv, _mpv, btnBrowse, lblExt, _ext, _rec, btnOk, btnCancel,
+            lblMpv, _mpv, btnBrowse,
+            lblExt, _ext, btnResetExt,
+            lblExtra, _extraArgs,
+            _rec, btnOk, btnCancel,
         });
     }
 
@@ -104,6 +132,7 @@ public sealed class SettingsForm : Form
     {
         MpvPathValue = _mpv.Text.Trim();
         ExtensionsValue = _ext.Text.Trim();
+        ExtraArgsValue = _extraArgs.Text.Trim();
         RecursiveValue = _rec.Checked;
     }
 }
